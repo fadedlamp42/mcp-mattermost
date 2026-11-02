@@ -104,7 +104,18 @@ def register_core_tools(mcp: FastMCP, mattermost: Mattermost, identity: SisterId
         requestedAck: Annotated[bool, Field(description=REQUESTED_ACK_DESCRIPTION)] = False,
         persistentNotifications: Annotated[bool, Field(description=PERSISTENT_NOTIFICATIONS_DESCRIPTION)] = False,
     ) -> dict[str, Any]:
-        """Create a new post in a channel, optionally replying in a thread, attaching local files, and marking its priority (important/urgent, acknowledgement requests)"""
+        """Create a new post in a channel, optionally replying in a thread, attaching local files, and marking its priority (important/urgent, acknowledgement requests).
+
+        message markdown renders images INLINE, mid-post, exactly where the
+        line sits: `![caption](https://host/x.png =640x)` between two
+        paragraphs shows the picture between them (the `=640x` suffix is the
+        display width). to turn a chart, diagram, or any progress-report
+        block into such a url, call system-mcp's report_block_publish — it
+        renders the block to PNG, hosts it publicly on zipline, and returns
+        the exact markdown line to paste. prefer that over filePaths
+        attachments when the picture belongs at a specific point in the
+        story: attachments pile up below the message, inline images read in
+        sequence."""
         priority_fields = post_priority(priority, requestedAck, persistentNotifications)
         file_ids = await mattermost.upload_files(channelId, filePaths) if filePaths else []
         body: dict[str, Any] = {"channel_id": channelId, "message": message}

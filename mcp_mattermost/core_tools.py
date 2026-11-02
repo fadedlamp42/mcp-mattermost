@@ -107,9 +107,10 @@ def register_core_tools(mcp: FastMCP, mattermost: Mattermost, identity: SisterId
         """Create a new post in a channel, optionally replying in a thread, attaching local files, and marking its priority (important/urgent, acknowledgement requests).
 
         message markdown renders images INLINE, mid-post, exactly where the
-        line sits: `![caption](https://host/x.png =640x)` between two
-        paragraphs shows the picture between them (the `=640x` suffix is the
-        display width). the house style alternates prose and pictures, and
+        line sits: `![caption](https://host/x.png =640)` between two
+        paragraphs shows the picture between them (` =640` is the display
+        width; ` =640x360` sets both; never ` =640x` with no height, which
+        mattermost reads as part of the url and the image breaks). the house style alternates prose and pictures, and
         captions each image with an italic line directly beneath it. to turn
         a chart or diagram into such a url, call system-mcp's
         report_block_publish: it renders the picture RAW (no frame or caption

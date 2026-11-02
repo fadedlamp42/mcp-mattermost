@@ -39,7 +39,10 @@ AT_DESCRIPTION = (
 )
 WAKE_DESCRIPTION = (
     "Prefix the message with an @mention of this account, so that when it fires the sisters' bridge opens a new session "
-    "for it: 'remind myself later'. Write the message as instructions to that future session"
+    "for it: 'remind myself later'. Yes, this works even though this account is the author: the bridge deliberately "
+    "does not filter a sister's own posts, only unaddressed ones (proven 2026-11-02: "
+    "https://mattermost.prism-dynamics.org/prism-dynamics/pl/6dgkkuydgb853pzka4owi3wbxy). "
+    "Write the message as instructions to that future session"
 )
 
 

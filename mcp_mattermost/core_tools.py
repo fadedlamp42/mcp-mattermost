@@ -16,6 +16,7 @@ from pydantic import Field
 
 from .api import Mattermost, MattermostError, post_priority, readable_post_list, readable_timestamps, split_identifiers
 from .identity import SisterIdentity
+from .inline_images import refusal_for as inline_image_refusal
 
 DEFAULT_DOWNLOAD_DIRECTORY = Path.home() / ".cache/mcp-mattermost/files"
 UNREAD_LIMIT_AFTER = 30
@@ -119,6 +120,9 @@ def register_core_tools(mcp: FastMCP, mattermost: Mattermost, identity: SisterId
         over filePaths attachments when the picture belongs at a specific
         point in the story: attachments pile up below the message, inline
         images read in sequence."""
+        refusal = inline_image_refusal(message)
+        if refusal:
+            return {"error": refusal}
         priority_fields = post_priority(priority, requestedAck, persistentNotifications)
         file_ids = await mattermost.upload_files(channelId, filePaths) if filePaths else []
         body: dict[str, Any] = {"channel_id": channelId, "message": message}

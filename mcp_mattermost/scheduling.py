@@ -108,7 +108,7 @@ def register_scheduling_tools(mcp: FastMCP, mattermost: Mattermost) -> None:
         requestedAck: Annotated[bool, Field(description=REQUESTED_ACK_DESCRIPTION)] = False,
         persistentNotifications: Annotated[bool, Field(description=PERSISTENT_NOTIFICATIONS_DESCRIPTION)] = False,
     ) -> dict[str, Any]:
-        """Schedule a post to be sent later as this account. Use it for reminders, follow-up checks, and (with wake=true) for waking a fresh agent session at a future time. Returns the scheduled post with its id; list, update, or cancel it with the other mattermost_*scheduled_post* tools."""
+        """Schedule a post to be sent later as this account. Use it for reminders, follow-up checks, and (with wake=true) for waking a fresh agent session at a future time. Returns the scheduled post with its id; list, update, or cancel it with the other mattermost_*scheduled_post* tools. When it serves a tracked issue, record that id with prism_supervision_record(issue_id, kind="mattermost_scheduled_post", value=<id>) so the cockpit shows the wake on the issue's row; an unrecorded one lands on the cockpit's unlinked-wakes shelf instead."""
         body: dict[str, Any] = {
             "channel_id": channelId,
             "message": with_self_mention(message, mattermost.me["username"]) if wake else message,

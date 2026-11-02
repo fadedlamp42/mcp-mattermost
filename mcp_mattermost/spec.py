@@ -15,9 +15,14 @@ from typing import Any
 import yaml
 
 SPEC_PATH = Path(__file__).resolve().parent.parent / "openapi.yaml"
+# the mattermost tag the vendored spec was built from (scripts/build-spec.sh
+# writes it); tool descriptions quote it so an agent knows which server
+# version "every operation" means
+SPEC_VERSION = (SPEC_PATH.parent / "openapi.version").read_text().strip()
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+PATH_TEMPLATE_PARAMETER = re.compile(r"\{([^}]+)\}")
 
-# two operations share the id SearchFiles in v11.5.1 (team-scoped and global).
+# two operations share the id SearchFiles since v11.5.1 (team-scoped and global).
 # the team-scoped one keeps the name; the global one is renamed so every
 # operation id is unique, which find/describe/call all key on.
 OPERATION_ID_OVERRIDES: dict[tuple[str, str], str] = {
@@ -47,6 +52,8 @@ def patch_spec(spec: dict[str, Any], base_url: str) -> None:
     spec["servers"] = [{"url": base_url.rstrip("/")}]
     _fix_misindented_media_types(spec)
     _fill_missing_response_descriptions(spec)
+    _declare_missing_path_parameters(spec)
+    _accept_create_at_on_scheduled_post_update(spec)
     _assign_operation_ids(spec)
 
 
@@ -74,12 +81,66 @@ def _fill_missing_response_descriptions(spec: dict[str, Any]) -> None:
                 response["description"] = "OK"
 
 
+def _declare_missing_path_parameters(spec: dict[str, Any]) -> None:
+    """every {name} in a path gets a declared, required path parameter.
+
+    GetUserScheduledPosts (/api/v4/posts/scheduled/team/{team_id}) declares
+    only a query parameter, so fastmcp exposed no team_id argument and the
+    call went out with a literal "{team_id}" in the url: a 404 that reads like
+    a missing endpoint (2026-11-02, PRI-1221). fixed for the whole class rather
+    than that one route, since the spec is hand-assembled upstream and any
+    future fragment can repeat it."""
+    for path, path_item in spec.get("paths", {}).items():
+        template_names = PATH_TEMPLATE_PARAMETER.findall(path)
+        if not template_names:
+            continue
+        shared_parameters = path_item.get("parameters") or []
+        for method in HTTP_METHODS:
+            operation = path_item.get(method)
+            if not isinstance(operation, dict):
+                continue
+            declared = {
+                parameter.get("name")
+                for parameter in [*shared_parameters, *(operation.get("parameters") or [])]
+                if isinstance(parameter, dict) and parameter.get("in") == "path"
+            }
+            for name in template_names:
+                if name not in declared:
+                    operation.setdefault("parameters", []).append(
+                        {"name": name, "in": "path", "required": True, "schema": {"type": "string"}}
+                    )
+
+
+def _accept_create_at_on_scheduled_post_update(spec: dict[str, Any]) -> None:
+    """the server validates the whole draft before restoring stored fields
+    (app.UpdateScheduledPost: IsValid, then RestoreNonUpdatableFields), so a
+    body without a nonzero create_at fails with "Create at must be a valid
+    time". the spec omits the field, and mattermost_call drops arguments its
+    schema does not list, so the update was unreachable. any nonzero value
+    passes; send the post's own create_at and the server keeps it anyway."""
+    operation = spec.get("paths", {}).get("/api/v4/posts/schedule/{scheduled_post_id}", {}).get("put")
+    if not isinstance(operation, dict):
+        return
+    schema = operation.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema")
+    if not isinstance(schema, dict):
+        return
+    properties = schema.setdefault("properties", {})
+    properties.setdefault(
+        "create_at",
+        {"type": "integer", "description": "The scheduled post's create_at (epoch ms) as returned when it was created or listed; required"},
+    )
+    required = schema.setdefault("required", [])
+    if "create_at" not in required:
+        required.append("create_at")
+
+
 def _assign_operation_ids(spec: dict[str, Any]) -> None:
     """every operation gets a unique, stable id.
 
-    twelve content-flagging operations ship with no operationId; their id is
-    derived from the summary ("Flag a post" -> FlagAPost), which survives a
-    spec rebuild as long as the summary does. duplicates are resolved through
+    an operation with no operationId gets one derived from its summary
+    ("Flag a post" -> FlagAPost). v11.5.1 shipped twelve content-flagging
+    operations that way; v11.7.14 names every operation upstream (FlagAPost
+    became PostCFPostFlag), so this is now a guard for future spec gaps. duplicates are resolved through
     OPERATION_ID_OVERRIDES, and any duplicate left over fails loudly here so a
     future spec cannot silently shadow one endpoint with another."""
     for path, path_item in spec.get("paths", {}).items():

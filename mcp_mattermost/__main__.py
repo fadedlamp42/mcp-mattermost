@@ -21,12 +21,17 @@ from .api import Mattermost
 from .core_tools import register_core_tools
 from .generic_tools import register_generic_tools
 from .identity import IdentityError, assert_token_speaks_as_sister, resolve_identity
+from .scheduling import register_scheduling_tools
 from .spec import index_operations, load_spec
 
 INSTRUCTIONS = (
     "Mattermost for the prism-dynamics team. The mattermost_* tools cover daily work "
-    "(posts, threads, attachments, reactions, channels, users). For anything else in the "
-    "Mattermost API, use mattermost_find_operation -> mattermost_describe_operation -> mattermost_call."
+    "(posts, threads, attachments, reactions, channels, users, message priority). "
+    "mattermost_schedule_post sends a post later (ISO 8601 time with an offset; lands within ~5 minutes of it); "
+    "with wake=true it mentions this account, so the sisters' bridge opens a new session when it fires: "
+    "the way to follow up on something at a future time. List, update, or cancel pending ones with the "
+    "mattermost_*scheduled_post* tools. For anything else in the Mattermost API, use "
+    "mattermost_find_operation -> mattermost_describe_operation -> mattermost_call."
 )
 
 
@@ -56,6 +61,7 @@ async def build_server() -> FastMCP:
 
     mcp = FastMCP(name="Mattermost", instructions=INSTRUCTIONS)
     register_core_tools(mcp, mattermost, identity)
+    register_scheduling_tools(mcp, mattermost)
     await register_generic_tools(mcp, spec, operations, client)
     print(
         f"mcp-mattermost: speaking as {identity.sister} ({len(operations)} operations reachable)",

@@ -2,22 +2,32 @@
 
 names and argument shapes match @dakatan/mcp-mattermost exactly (camelCase,
 comma-separated id lists) so prompts written against the old server keep
-working. three tools are new: file attachments on create_post, file
-download (PRI-923), and whoami (PRI-549).
+working. new since then: file attachments and message priority on
+create_post, file download (PRI-923), and whoami (PRI-549). the scheduling
+tools live in scheduling.py.
 """
 
 import asyncio
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastmcp import FastMCP
 from pydantic import Field
 
-from .api import Mattermost, MattermostError, readable_post_list, readable_timestamps, split_identifiers
+from .api import Mattermost, MattermostError, post_priority, readable_post_list, readable_timestamps, split_identifiers
 from .identity import SisterIdentity
 
 DEFAULT_DOWNLOAD_DIRECTORY = Path.home() / ".cache/mcp-mattermost/files"
 UNREAD_LIMIT_AFTER = 30
+
+# message priority is a licensed feature; our prism build carries a
+# self-issued license (PRI-1221), so these work against our server
+PriorityLevel = Literal["standard", "important", "urgent"]
+PRIORITY_DESCRIPTION = "Message priority label: 'important' or 'urgent' (shown as a badge). Omit for a normal post"
+REQUESTED_ACK_DESCRIPTION = "Ask recipients to acknowledge the post (adds an acknowledge button and tracks who did)"
+PERSISTENT_NOTIFICATIONS_DESCRIPTION = (
+    "Re-notify mentioned users repeatedly until they read it. Requires priority 'urgent' and at least one @mention; use sparingly"
+)
 
 SEARCH_POSTS_DESCRIPTION = """Search posts by term with support for advanced search modifiers. Without any modifiers, performs a general search across all accessible content. Supported modifiers include:
 
@@ -90,14 +100,20 @@ def register_core_tools(mcp: FastMCP, mattermost: Mattermost, identity: SisterId
             Optional[list[str]],
             Field(description="Absolute paths of local files to attach (up to 10). Each is uploaded to the channel first."),
         ] = None,
+        priority: Annotated[Optional[PriorityLevel], Field(description=PRIORITY_DESCRIPTION)] = None,
+        requestedAck: Annotated[bool, Field(description=REQUESTED_ACK_DESCRIPTION)] = False,
+        persistentNotifications: Annotated[bool, Field(description=PERSISTENT_NOTIFICATIONS_DESCRIPTION)] = False,
     ) -> dict[str, Any]:
-        """Create a new post in a channel, optionally replying in a thread and attaching local files"""
+        """Create a new post in a channel, optionally replying in a thread, attaching local files, and marking its priority (important/urgent, acknowledgement requests)"""
+        priority_fields = post_priority(priority, requestedAck, persistentNotifications)
         file_ids = await mattermost.upload_files(channelId, filePaths) if filePaths else []
         body: dict[str, Any] = {"channel_id": channelId, "message": message}
         if rootId:
             body["root_id"] = rootId
         if file_ids:
             body["file_ids"] = file_ids
+        if priority_fields:
+            body["metadata"] = {"priority": priority_fields}
         return readable_timestamps(await mattermost.request("POST", "/api/v4/posts", json=body))
 
     @mcp.tool(name="mattermost_download_file")

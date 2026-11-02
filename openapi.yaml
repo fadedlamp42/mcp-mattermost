@@ -272,6 +272,7 @@ info:
       - reaction_removed
       - response
       - role_updated
+      - shared_channel_remote_updated
       - status_change
       - typing
       - update_team
@@ -283,6 +284,10 @@ info:
       - thread_updated
       - thread_follow_changed
       - thread_read_changed
+      - property_field_created
+      - property_field_updated
+      - property_field_deleted
+      - property_values_updated
 
     ### Websocket API
 
@@ -401,6 +406,8 @@ tags:
     description: Endpoints for creating and performing file uploads.
   - name: bookmarks
     description: Endpoints for creating, getting and interacting with channel bookmarks.
+  - name: views
+    description: Endpoints for creating, getting and interacting with channel views.
   - name: preferences
     description: Endpoints for saving and modifying user preferences.
   - name: status
@@ -5984,7 +5991,7 @@ paths:
       - name: include_total_count
         in: query
         description: >-
-          Appends a total count of returned channels inside the response object - ex: `{ "channels": [], "total_count" : 0 }`.      
+          Appends a total count of returned channels inside the response object - ex: `{ "channels": [], "total_count" : 0 }`.
         schema:
           type: boolean
           default: false
@@ -6053,6 +6060,15 @@ paths:
                 type:
                   type: string
                   description: "'O' for a public channel, 'P' for a private channel"
+                managed_category_name:
+                  type: string
+                  description: The name of the managed category to assign this channel to.
+                    Requires an Enterprise license and the `ManagedChannelCategories` feature flag
+                    to be enabled.
+                default_category_name:
+                  type: string
+                  description: Default sidebar category name for members when joining this channel.
+                    Requires `EnableChannelCategorySorting` to be enabled on the server.
         description: Channel object to be created
         required: true
       responses:
@@ -6511,7 +6527,7 @@ paths:
         interface. They can be viewed and unarchived in the **System Console > User Management > Channels** based on your license. Direct and group message channels cannot be deleted.
 
 
-        As of server version 5.28, optionally use the `permanent=true` query parameter to permanently delete the channel for compliance reasons. To use this feature `ServiceSettings.EnableAPIChannelDeletion` must be set to `true` in the server's configuration. 
+        As of server version 5.28, optionally use the `permanent=true` query parameter to permanently delete the channel for compliance reasons. To use this feature `ServiceSettings.EnableAPIChannelDeletion` must be set to `true` in the server's configuration.
         If you permanently delete a channel this action is not recoverable outside of a database backup.
 
 
@@ -6618,6 +6634,16 @@ paths:
                     channels by server configuration.
                 banner_info:
                   $ref: "#/components/schemas/ChannelBanner"
+                managed_category_name:
+                  type: string
+                  description: The name of the managed category to assign this channel to.
+                    Set to an empty string to clear. Requires an Enterprise license and
+                    the `ManagedChannelCategories` feature flag to be enabled.
+                default_category_name:
+                  type: string
+                  description: Default sidebar category name for members when joining this channel.
+                    Set to an empty string to clear. Requires `EnableChannelCategorySorting`
+                    to be enabled on the server.
         description: Channel patch object; include only the fields to update. At least
           one field must be provided.
         required: true
@@ -7071,6 +7097,48 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  "/api/v4/teams/{team_id}/channels/managed_categories":
+    get:
+      tags:
+        - channels
+      summary: Get managed category mappings
+      description: >
+        Returns a map of channel ID to managed category name for all channels
+        the requesting user is a member of in the given team that have a
+        managed category assigned.
+
+
+        Requires an Enterprise license and the `ManagedChannelCategories` feature flag
+        to be enabled.
+
+
+        ##### Permissions
+
+        Must be authenticated.
+      operationId: GetManagedCategories
+      parameters:
+        - name: team_id
+          in: path
+          description: Team ID
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Managed category mappings retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                description: A map of channel ID to managed category name
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Returned when the `ManagedChannelCategories` feature flag is disabled.
+        "501":
+          description: Returned when the server does not have an Enterprise license.
   "/api/v4/teams/{team_id}/channels/search":
     post:
       tags:
@@ -7294,6 +7362,191 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ChannelMember"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      tags:
+        - channels
+      summary: Set channel members
+      description: |
+        Set the complete membership list for a channel, with optional channel admin designation.
+        The server compares the provided list against the current membership and adds or removes
+        users as needed. Users already in the channel are left untouched (no-op).
+
+        When `channel_admins` is provided, a role reconciliation phase runs after membership
+        changes: listed users are promoted to channel admin, all other members are demoted.
+        When `channel_admins` is omitted (null), existing admin roles are preserved.
+
+        Results are streamed back as NDJSON (`application/x-ndjson`), one line per batch. Each line
+        is a JSON object with `added`, `removed`, `promoted`, `demoted`, and `errors` arrays for
+        that batch.
+
+        Removals are processed before additions, then role changes. Private channels cannot be
+        emptied entirely. DM/GM and group-constrained channels are rejected.
+
+        #### Example: membership only
+
+        Request (using `batch_size=2` and `batch_delay_ms=200`):
+
+        ```bash
+        curl -X PUT \
+          'https://mattermost.example.com/api/v4/channels/channel123/members?batch_size=2&batch_delay_ms=200' \
+          -H 'Authorization: Bearer <token>' \
+          -H 'Content-Type: application/json' \
+          -d '{"members": ["user_id_1", "user_id_2", "user_id_3", "user_id_4"]}'
+        ```
+
+        Streamed NDJSON response (one JSON object per line, one line per batch):
+
+        ```text
+        {"added":[],"removed":["user_id_5","user_id_6"],"errors":[]}
+        {"added":["user_id_3","user_id_4"],"removed":[],"errors":[]}
+        {"added":[],"removed":[],"errors":[{"user_id":"user_id_7","id":"api.channel.add_members.user_denied","error":"user is not a member of the team"}]}
+        ```
+
+        In this example, `user_id_1` and `user_id_2` were already members (no-op), `user_id_5` and
+        `user_id_6` were removed, `user_id_3` and `user_id_4` were added, and `user_id_7` could not
+        be added because the user is not on the team.
+
+        #### Example: membership with admin roles
+
+        ```bash
+        curl -X PUT \
+          'https://mattermost.example.com/api/v4/channels/channel123/members' \
+          -H 'Authorization: Bearer <token>' \
+          -H 'Content-Type: application/json' \
+          -d '{"members": ["user_id_1", "user_id_2", "user_id_3"], "channel_admins": ["user_id_1"]}'
+        ```
+
+        Response:
+
+        ```text
+        {"added":["user_id_3"],"removed":["user_id_4"]}
+        {"promoted":["user_id_1"],"demoted":["user_id_2"]}
+        ```
+
+        In this example, `user_id_1` was promoted to channel admin and `user_id_2` was demoted.
+        When `channel_admins` is omitted, existing admin roles are preserved.
+
+        __Minimum server version__: 11.7
+        ##### Permissions
+        Must have `manage_system` permission (system admin only).
+      operationId: SetChannelMembers
+      parameters:
+        - name: channel_id
+          in: path
+          description: Channel GUID
+          required: true
+          schema:
+            type: string
+        - name: batch_size
+          in: query
+          description: Number of add/remove operations per batch.
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+        - name: batch_delay_ms
+          in: query
+          description: Milliseconds to pause between batches, giving the server time to process
+            websocket events and plugin hooks.
+          schema:
+            type: integer
+            default: 500
+            minimum: 0
+            maximum: 10000
+      requestBody:
+        description: JSON object specifying the complete desired membership and
+          optional channel admin designations. Request body is limited to 12 MB.
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - members
+              properties:
+                members:
+                  type: array
+                  items:
+                    type: string
+                  description: User IDs for the desired channel membership. The
+                    final membership is the union of `members` and `channel_admins`.
+                channel_admins:
+                  type: array
+                  nullable: true
+                  items:
+                    type: string
+                  description: User IDs that should have the channel admin role.
+                    Users listed here are automatically included in the desired
+                    membership (they do not need to also appear in `members`).
+                    When null or omitted, existing admin roles are preserved for
+                    members who remain in the channel. When present (including
+                    empty array), admin roles are set declaratively.
+        required: true
+      responses:
+        "200":
+          description: |
+            Streamed NDJSON response. Each line is a JSON object representing one batch of results.
+
+            If the operation is interrupted (e.g. context cancellation), a final NDJSON line
+            with an `error` field is emitted so the client can distinguish partial from full
+            success: `{"error":"The set channel members operation was cancelled."}`
+          content:
+            application/x-ndjson:
+              schema:
+                oneOf:
+                  - type: object
+                    description: A batch of results from the set channel members operation.
+                    properties:
+                      added:
+                        type: array
+                        items:
+                          type: string
+                        description: User IDs successfully added to the channel in this batch.
+                      removed:
+                        type: array
+                        items:
+                          type: string
+                        description: User IDs successfully removed from the channel in this batch.
+                      promoted:
+                        type: array
+                        items:
+                          type: string
+                        description: User IDs promoted to channel admin in this batch.
+                      demoted:
+                        type: array
+                        items:
+                          type: string
+                        description: User IDs demoted from channel admin in this batch.
+                      errors:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            user_id:
+                              type: string
+                              description: The user ID that failed.
+                            id:
+                              type: string
+                              description: Machine-readable error identifier (i18n key).
+                            error:
+                              type: string
+                              description: Human-readable description of the failure.
+                        description: Per-user failures (not on team, deleted user, cannot remove
+                          from default channel, plugin rejection).
+                  - type: object
+                    description: Terminal error line emitted when the operation is interrupted.
+                    required:
+                      - error
+                    properties:
+                      error:
+                        type: string
+                        description: Human-readable description of the interruption.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -8490,7 +8743,7 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
-          
+
   "/api/v4/sharedchannels/{channel_id}/remotes":
     get:
       tags:
@@ -8498,9 +8751,9 @@ paths:
       summary: Get remote clusters for a shared channel
       description: |
         Gets the remote clusters information for a shared channel.
-        
+
         __Minimum server version__: 10.10
-        
+
         ##### Permissions
         Must be authenticated and have the `read_channel` permission for the channel.
       operationId: GetSharedChannelRemotes
@@ -8567,7 +8820,6 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
-
   /api/v4/posts:
     post:
       tags:
@@ -9180,6 +9432,11 @@ paths:
           schema:
             type: boolean
             default: false
+        - name: type
+          in: query
+          description: Filter posts by type.
+          schema:
+            type: string
       responses:
         "200":
           description: Post list retrieval successful
@@ -11484,6 +11741,90 @@ paths:
                 $ref: "#/components/schemas/StatusOK"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /api/v4/system/e2e/ai_bridge:
+    put:
+      tags:
+        - system
+      summary: Configure AI bridge E2E test helper
+      description: >
+        Configure the in-memory AI bridge test helper used by end-to-end tests to
+        mock agent availability, agent/service listings, queued completion
+        responses, and test-only AI feature flag overrides.
+
+        This endpoint is only available when `EnableTesting` is enabled.
+
+        ##### Permissions
+
+        Must have `manage_system` permission.
+      operationId: SetAIBridgeTestHelper
+      requestBody:
+        description: AI bridge E2E helper configuration
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIBridgeTestHelperConfig"
+      responses:
+        "200":
+          description: AI bridge test helper configured successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIBridgeTestHelperState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+    get:
+      tags:
+        - system
+      summary: Get AI bridge E2E test helper state
+      description: >
+        Retrieve the current in-memory AI bridge test helper state used for end-to-end tests.
+
+        This endpoint is only available when `EnableTesting` is enabled.
+
+        ##### Permissions
+
+        Must have `manage_system` permission.
+      operationId: GetAIBridgeTestHelper
+      responses:
+        "200":
+          description: AI bridge test helper state retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIBridgeTestHelperState"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+    delete:
+      tags:
+        - system
+      summary: Reset AI bridge E2E test helper
+      description: >
+        Reset the in-memory AI bridge test helper state used for end-to-end tests.
+
+        This endpoint is only available when `EnableTesting` is enabled.
+
+        ##### Permissions
+
+        Must have `manage_system` permission.
+      operationId: DeleteAIBridgeTestHelper
+      responses:
+        "200":
+          description: AI bridge test helper was reset successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusOK"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
   /api/v4/database/recycle:
     post:
       tags:
@@ -14018,7 +14359,7 @@ paths:
   /api/v4/ldap/groups:
     get:
       tags:
-        - ldap
+        - LDAP
       summary: Returns a list of LDAP groups
       description: >
         ##### Permissions
@@ -14065,7 +14406,7 @@ paths:
   /api/v4/ldap/groups/{remote_id}/link:
     post:
       tags:
-        - ldap
+        - LDAP
       summary: Link a LDAP group
       description: >
         ##### Permissions
@@ -18331,7 +18672,7 @@ paths:
         Get a list of remote clusters.
 
         ##### Permissions
-        `manage_secure_connections`
+        `manage_secure_connections` or `manage_shared_channels`
       operationId: GetRemoteClusters
       parameters:
         - name: page
@@ -18458,7 +18799,7 @@ paths:
         Get the Remote Cluster details from the provided id string.
 
         ##### Permissions
-        `manage_secure_connections`
+        `manage_secure_connections` or `manage_shared_channels`
       operationId: GetRemoteCluster
       parameters:
         - name: remote_id
@@ -18685,7 +19026,7 @@ paths:
         and their status.
 
         ##### Permissions
-        `manage_secure_connections`
+        `manage_secure_connections` or `manage_shared_channels`
       operationId: GetSharedChannelRemotesByRemoteCluster
       parameters:
         - name: remote_id
@@ -18764,6 +19105,12 @@ paths:
           required: true
           schema:
             type: string
+        - name: include_deleted
+          in: query
+          description: Include deleted remote clusters
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
           description: Remote cluster info retrieval successful
@@ -18863,9 +19210,9 @@ paths:
       summary: Get remote clusters for a shared channel
       description: |
         Gets the remote clusters information for a shared channel.
-        
+
         __Minimum server version__: 10.11
-        
+
         ##### Permissions
         Must be authenticated and have the `read_channel` permission for the channel.
       operationId: GetSharedChannelRemotes
@@ -18902,9 +19249,9 @@ paths:
       description: |
         Checks if a user can send direct messages to another user, considering shared channel restrictions.
         This is specifically for shared channels where DMs require direct connections between clusters.
-        
+
         __Minimum server version__: 10.11
-        
+
         ##### Permissions
         Must be authenticated and have permission to view the user.
       operationId: CanUserDirectMessage
@@ -19037,40 +19384,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatusOK"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-  /api/v4/posts/ids/reactions:
-    post:
-      tags:
-        - reactions
-      summary: Bulk get the reaction for posts
-      description: |
-        Get a list of reactions made by all users to a given post.
-        ##### Permissions
-        Must have `read_channel` permission for the channel the post is in.
-
-        __Minimum server version__: 5.8
-      operationId: GetBulkReactions
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: array
-              items:
-                type: string
-        description: Array of post IDs
-        required: true
-      responses:
-        "200":
-          description: Reactions retrieval successful
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PostIdToReactionsMap"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -20806,6 +21119,398 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /api/v4/channels/{channel_id}/views:
+    get:
+      tags:
+        - views
+      summary: List channel views
+      description: |
+        Get a list of views for a channel.
+
+        __Minimum server version__: 11.6
+
+        ##### Permissions
+        Must have `read_channel_content` permission for the channel.
+      operationId: ListChannelViews
+      parameters:
+        - name: channel_id
+          in: path
+          description: Channel GUID
+          required: true
+          schema:
+            type: string
+        - name: per_page
+          in: query
+          description: The number of views per page (default 60, max 200)
+          required: false
+          schema:
+            type: integer
+            default: 60
+            maximum: 200
+        - name: page
+          in: query
+          description: The 0-based page number for pagination (default 0)
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: include_total_count
+          in: query
+          description: >
+            When true, the response is a ViewsWithCount object containing
+            a views array and a total_count integer. When false or omitted,
+            the response is a plain JSON array of View objects.
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Channel views retrieval successful
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: "#/components/schemas/View"
+                    description: Plain array of views (default, when include_total_count is false)
+                  - $ref: "#/components/schemas/ViewsWithCount"
+                    description: Views with total count (when include_total_count is true)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    post:
+      tags:
+        - views
+      summary: Create channel view
+      description: |
+        Create a new view for a channel.
+
+        __Minimum server version__: 11.6
+
+        ##### Permissions
+        Must have `create_post` permission for the channel.
+      operationId: CreateChannelView
+      parameters:
+        - name: channel_id
+          in: path
+          description: Channel GUID
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+                - type
+              properties:
+                title:
+                  type: string
+                  description: The title of the view
+                  maxLength: 256
+                type:
+                  type: string
+                  enum: [kanban]
+                  description: |
+                    The type of the view.
+                    * `kanban` - a kanban view
+                description:
+                  type: string
+                  description: The description of the view
+                  maxLength: 1024
+                sort_order:
+                  type: integer
+                  description: The display order of the view within the channel
+                props:
+                  type: object
+                  description: Arbitrary key-value properties for the view
+                  additionalProperties: true
+        description: View object to be created
+        required: true
+      responses:
+        "201":
+          description: Channel view creation successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/View"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v4/channels/{channel_id}/views/{view_id}:
+    get:
+      tags:
+        - views
+      summary: Get a channel view
+      description: |
+        Get a single view by its ID.
+
+        __Minimum server version__: 11.6
+
+        ##### Permissions
+        Must have `read_channel_content` permission for the channel.
+      operationId: GetChannelView
+      parameters:
+        - name: channel_id
+          in: path
+          description: Channel GUID
+          required: true
+          schema:
+            type: string
+        - name: view_id
+          in: path
+          description: View GUID
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Channel view retrieval successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/View"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    patch:
+      tags:
+        - views
+      summary: Update a channel view
+      description: |
+        Partially update a channel view by providing only the fields
+        you want to update. Omitted fields will not be updated.
+
+        __Minimum server version__: 11.6
+
+        ##### Permissions
+        Must have `create_post` permission for the channel.
+      operationId: UpdateChannelView
+      parameters:
+        - name: channel_id
+          in: path
+          description: Channel GUID
+          required: true
+          schema:
+            type: string
+        - name: view_id
+          in: path
+          description: View GUID
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ViewPatch"
+        description: View fields to be updated
+        required: true
+      responses:
+        "200":
+          description: Channel view update successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/View"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      tags:
+        - views
+      summary: Delete a channel view
+      description: |
+        Soft-deletes a channel view. Sets `delete_at` to current timestamp.
+
+        __Minimum server version__: 11.6
+
+        ##### Permissions
+        Must have `create_post` permission for the channel.
+      operationId: DeleteChannelView
+      parameters:
+        - name: channel_id
+          in: path
+          description: Channel GUID
+          required: true
+          schema:
+            type: string
+        - name: view_id
+          in: path
+          description: View GUID
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Channel view deletion successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusOK"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v4/channels/{channel_id}/views/{view_id}/posts:
+    get:
+      tags:
+        - views
+      summary: Get posts for a view
+      description: |
+        Get a paginated list of posts that belong to a specific view.
+
+        __Minimum server version__: 11.6
+
+        ##### Permissions
+        Must have `read_channel_content` permission for the channel.
+      operationId: GetPostsForView
+      parameters:
+        - name: channel_id
+          in: path
+          description: Channel GUID
+          required: true
+          schema:
+            type: string
+        - name: view_id
+          in: path
+          description: View GUID
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          description: The 0-based page number for pagination (default 0)
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: per_page
+          in: query
+          description: The number of posts per page (default 60, max 200)
+          required: false
+          schema:
+            type: integer
+            default: 60
+            maximum: 200
+      responses:
+        "200":
+          description: Post list retrieval successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v4/channels/{channel_id}/views/{view_id}/sort_order:
+    post:
+      tags:
+        - views
+      summary: Update a channel view's sort order
+      description: |
+        Updates the sort order of a channel view, setting its new index
+        from the request body and updating the rest of the views in the
+        channel to accommodate the change.
+
+        __Minimum server version__: 11.6
+
+        ##### Permissions
+        Must have `create_post` permission for the channel.
+      operationId: UpdateChannelViewSortOrder
+      parameters:
+        - name: channel_id
+          in: path
+          description: Channel GUID
+          required: true
+          schema:
+            type: string
+        - name: view_id
+          in: path
+          description: View GUID
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: integer
+              format: int64
+              description: The new sort order index for the view
+      responses:
+        "200":
+          description: Channel view sort order update successful
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/View"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /api/v4/reports/users:
     get:
       tags:
@@ -21747,8 +22452,6 @@ paths:
       description: |
         List all the Custom Profile Attributes fields.
 
-        _This endpoint is experimental._
-
         __Minimum server version__: 10.5
 
         ##### Permissions
@@ -21772,8 +22475,6 @@ paths:
       summary: Create a Custom Profile Attribute field
       description: |
         Create a new Custom Profile Attribute field on the system.
-
-        _This endpoint is experimental._
 
         __Minimum server version__: 10.5
 
@@ -21862,8 +22563,6 @@ paths:
 
         **Note:** Fields with `attrs.protected = true` cannot be
         modified and will return an error.
-
-        _This endpoint is experimental._
 
         __Minimum server version__: 10.5
 
@@ -21955,8 +22654,6 @@ paths:
         Marks a Custom Profile Attribute field and all its values as
         deleted.
 
-        _This endpoint is experimental._
-
         __Minimum server version__: 10.5
 
         ##### Permissions
@@ -21997,8 +22694,6 @@ paths:
 
         **Note:** Values for fields with `attrs.protected = true` cannot be
         updated and will return an error.
-
-        _This endpoint is experimental._
 
         __Minimum server version__: 10.5
 
@@ -22084,8 +22779,6 @@ paths:
       description: |
         List all the Custom Profile Attributes values for specified user.
 
-        _This endpoint is experimental._
-
         __Minimum server version__: 10.5
 
         ##### Permissions
@@ -22127,8 +22820,6 @@ paths:
 
         **Note:** Values for fields with `attrs.protected = true` cannot be
         updated and will return an error.
-
-        _This endpoint is experimental._
 
         __Minimum server version__: 11
 
@@ -22870,6 +23561,7 @@ paths:
         An enterprise advanced license is required.
       tags:
         - Content Flagging
+      operationId: GetCFFlagConfig
       responses:
         '200':
           description: Configuration retrieved successfully
@@ -22907,6 +23599,7 @@ paths:
           schema:
             type: string
           description: The ID of the team to retrieve the content flagging status for
+      operationId: GetCFTeamStatus
       responses:
         '200':
           description: Content flagging status retrieved successfully
@@ -22941,6 +23634,7 @@ paths:
           schema:
             type: string
           description: The ID of the post to be flagged
+      operationId: PostCFPostFlag
       requestBody:
         required: true
         content:
@@ -22979,6 +23673,7 @@ paths:
         An enterprise advanced license is required.
       tags:
         - Content Flagging
+      operationId: GetCFFields
       responses:
         '200':
           description: Custom fields retrieved successfully
@@ -23010,6 +23705,7 @@ paths:
           schema:
             type: string
           description: The ID of the post to retrieve property field values for
+      operationId: GetCFPostFieldValues
       responses:
         '200':
           description: Property field values retrieved successfully
@@ -23043,6 +23739,7 @@ paths:
               schema:
                   type: string
               description: The ID of the post to retrieve
+        operationId: GetCFPost
         responses:
             '200':
               description: The flagged post is fetched correctly
@@ -23074,6 +23771,7 @@ paths:
               schema:
                   type: string
               description: The ID of the post to be removed
+        operationId: RemoveCFPost
         responses:
             '200':
               description: Post removed successfully
@@ -23105,6 +23803,7 @@ paths:
           schema:
             type: string
           description: The ID of the post to be kept
+      operationId: KeepCFPost
       responses:
         '200':
           description: Post marked to be kept successfully
@@ -23128,6 +23827,7 @@ paths:
         Only system admins can access this endpoint.
       tags:
         - Content Flagging
+      operationId: GetCFConfig
       responses:
         '200':
           description: Configuration retrieved successfully
@@ -23148,6 +23848,7 @@ paths:
             Only system admins can access this endpoint.
         tags:
             - Content Flagging
+        operationId: UpdateCFConfig
         requestBody:
           required: true
           content:
@@ -23187,6 +23888,7 @@ paths:
           schema:
             type: string
           description: The search term to filter content reviewers by
+      operationId: SearchCFTeamReviewers
       responses:
         '200':
           description: Content reviewers retrieved successfully
@@ -23226,6 +23928,7 @@ paths:
           schema:
             type: string
           description: The ID of the user to be assigned as the content reviewer for the post
+      operationId: PostCFPostReviewer
       responses:
         '200':
           description: Content reviewer assigned successfully
@@ -23323,6 +24026,365 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  "/api/v4/properties/groups/{group_name}/{object_type}/fields":
+    post:
+      tags:
+        - properties
+      summary: Create a property field
+      description: >
+        Create a new property field for a specific group and object type.
+      operationId: CreatePropertyField
+      parameters:
+        - name: group_name
+          in: path
+          description: The name of the property group
+          required: true
+          schema:
+            type: string
+        - name: object_type
+          in: path
+          description: The type of object this property field applies to
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - type
+                - target_type
+              properties:
+                name:
+                  type: string
+                  description: The name of the property field
+                type:
+                  type: string
+                  description: The type of property field
+                  enum: [text, select, multiselect, date, user, multiuser]
+                attrs:
+                  type: object
+                  description: Additional attributes for the property field
+                target_type:
+                  type: string
+                  description: The scope level of the property
+                target_id:
+                  type: string
+                  description: The ID of the target
+                permission_field:
+                  type: string
+                  enum: [none, sysadmin, member]
+                  description: >
+                    Permission level for editing the field definition.
+                    Only system admins can set this; ignored for non-admin users.
+                  default: member
+                permission_values:
+                  type: string
+                  enum: [none, sysadmin, member]
+                  description: >
+                    Permission level for setting values on objects.
+                    Only system admins can set this; ignored for non-admin users.
+                  default: member
+                permission_options:
+                  type: string
+                  enum: [none, sysadmin, member]
+                  description: >
+                    Permission level for managing options on select/multiselect fields.
+                    Only system admins can set this; ignored for non-admin users.
+                  default: member
+        description: Property field object to create
+        required: true
+      responses:
+        "201":
+          description: Property field creation successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PropertyField"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    get:
+      tags:
+        - properties
+      summary: Get property fields
+      description: >
+        Get a list of property fields for a specific group and object type. Requires a target_type parameter to scope the query. Filter further by target_id to narrow results. Uses cursor-based pagination.
+      operationId: GetPropertyFields
+      parameters:
+        - name: group_name
+          in: path
+          description: The name of the property group
+          required: true
+          schema:
+            type: string
+        - name: object_type
+          in: path
+          description: The type of object to retrieve property fields for
+          required: true
+          schema:
+            type: string
+        - name: target_type
+          in: query
+          description: The scope level to query. Must be one of 'system', 'team', or 'channel'.
+          required: true
+          schema:
+            type: string
+            enum:
+              - system
+              - team
+              - channel
+        - name: target_id
+          in: query
+          description: Filter by target ID. Required when target_type is 'channel' or 'team'.
+          schema:
+            type: string
+        - name: cursor_id
+          in: query
+          description: The ID of the last property field from the previous page, for cursor-based pagination.
+          schema:
+            type: string
+        - name: cursor_create_at
+          in: query
+          description: The create_at timestamp of the last property field from the previous page. Must be provided together with cursor_id.
+          schema:
+            type: integer
+            format: int64
+        - name: per_page
+          in: query
+          description: The number of property fields per page.
+          schema:
+            type: integer
+            default: 60
+      responses:
+        "200":
+          description: Property fields retrieval successful
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PropertyField"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/api/v4/properties/groups/{group_name}/{object_type}/fields/{field_id}":
+    patch:
+      tags:
+        - properties
+      summary: Update a property field
+      description: >
+        Partially update a property field by providing only the fields you want to update. Omitted fields will not be updated.
+        The `attrs` object uses merge semantics: only the keys present in the patch are updated; omitted keys are preserved. Setting a key to `null` removes it from attrs.
+      operationId: UpdatePropertyField
+      parameters:
+        - name: group_name
+          in: path
+          description: The name of the property group
+          required: true
+          schema:
+            type: string
+        - name: object_type
+          in: path
+          description: The type of object this property field applies to
+          required: true
+          schema:
+            type: string
+        - name: field_id
+          in: path
+          description: Property field ID
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PropertyFieldPatch"
+        description: Property field patch object
+        required: true
+      responses:
+        "200":
+          description: Property field update successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PropertyField"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags:
+        - properties
+      summary: Delete a property field
+      description: >
+        Deletes a property field and all its associated values.
+      operationId: DeletePropertyField
+      parameters:
+        - name: group_name
+          in: path
+          description: The name of the property group
+          required: true
+          schema:
+            type: string
+        - name: object_type
+          in: path
+          description: The type of object this property field applies to
+          required: true
+          schema:
+            type: string
+        - name: field_id
+          in: path
+          description: Property field ID
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Property field deletion successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusOK"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v4/properties/groups/{group_name}/{object_type}/values/{target_id}":
+    get:
+      tags:
+        - properties
+      summary: Get property values for a target
+      description: >
+        Get all property values for a specific target within a group.
+      operationId: GetPropertyValues
+      parameters:
+        - name: group_name
+          in: path
+          description: The name of the property group
+          required: true
+          schema:
+            type: string
+        - name: object_type
+          in: path
+          description: The type of object
+          required: true
+          schema:
+            type: string
+        - name: target_id
+          in: path
+          description: The ID of the target object
+          required: true
+          schema:
+            type: string
+        - name: cursor_id
+          in: query
+          description: The ID of the last property value from the previous page, for cursor-based pagination.
+          schema:
+            type: string
+        - name: cursor_create_at
+          in: query
+          description: The create_at timestamp of the last property value from the previous page. Must be provided together with cursor_id.
+          schema:
+            type: integer
+            format: int64
+        - name: per_page
+          in: query
+          description: The number of property values per page.
+          schema:
+            type: integer
+            default: 60
+      responses:
+        "200":
+          description: Property values retrieval successful
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PropertyValue"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      tags:
+        - properties
+      summary: Update property values for a target
+      description: >
+        Update one or more property values for a specific target within a group. Uses upsert semantics: creates the value if it doesn't exist, updates it if it does. All field IDs must belong to the specified group.
+      operationId: UpdatePropertyValues
+      parameters:
+        - name: group_name
+          in: path
+          description: The name of the property group
+          required: true
+          schema:
+            type: string
+        - name: object_type
+          in: path
+          description: The type of object
+          required: true
+          schema:
+            type: string
+        - name: target_id
+          in: path
+          description: The ID of the target object
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                required:
+                  - field_id
+                  - value
+                properties:
+                  field_id:
+                    type: string
+                    description: The ID of the property field
+                  value:
+                    description: The value to set for this property. Can be any JSON type.
+        description: Array of property values to update
+        required: true
+      responses:
+        "200":
+          description: Property values update successful
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PropertyValue"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 components:
   securitySchemes:
     bearerAuth:
@@ -23682,6 +24744,72 @@ components:
           $ref: "#/components/schemas/ChannelBookmarkWithFileInfo"
         deleted:
           $ref: "#/components/schemas/ChannelBookmarkWithFileInfo"
+    View:
+      type: object
+      properties:
+        id:
+          type: string
+          description: The unique identifier of the view
+        channel_id:
+          type: string
+          description: The ID of the channel this view belongs to
+        type:
+          type: string
+          enum: [kanban]
+        creator_id:
+          type: string
+          description: The ID of the user who created this view
+        title:
+          type: string
+          description: The title of the view
+        description:
+          type: string
+          description: The description of the view
+        sort_order:
+          type: integer
+          description: The display order of the view within the channel
+        props:
+          type: object
+          description: Arbitrary key-value properties for the view
+          additionalProperties: true
+        create_at:
+          description: The time in milliseconds the view was created
+          type: integer
+          format: int64
+        update_at:
+          description: The time in milliseconds the view was last updated
+          type: integer
+          format: int64
+        delete_at:
+          description: The time in milliseconds the view was deleted
+          type: integer
+          format: int64
+    ViewPatch:
+      type: object
+      description: Fields that can be updated on a view via PATCH
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        sort_order:
+          type: integer
+        props:
+          type: object
+          description: Arbitrary key-value properties for the view
+          additionalProperties: true
+    ViewsWithCount:
+      type: object
+      description: Paginated list of views with total count
+      properties:
+        views:
+          type: array
+          items:
+            $ref: "#/components/schemas/View"
+        total_count:
+          type: integer
+          format: int64
+          description: Total number of views matching the query (ignoring pagination)
     Post:
       type: object
       properties:
@@ -23737,12 +24865,36 @@ components:
           type: string
         type:
           type: string
+          description: The type of property
+          enum: [text, select, multiselect, date, user, multiuser]
+        object_type:
+          type: string
+          description: The type of object this property applies to
+          enum: [post, channel, user]
         attrs:
           type: object
+          description: Additional attributes
         target_id:
           type: string
+          description: The ID of the target (empty for system-level, team ID for team-level, channel ID for channel-level)
         target_type:
           type: string
+          description: The scope level (system, team, channel)
+        protected:
+          type: boolean
+          description: Whether this field is protected from API modification
+        permission_field:
+          type: string
+          description: Permission level for editing the field definition
+          enum: [none, sysadmin, member]
+        permission_values:
+          type: string
+          description: Permission level for setting values on objects
+          enum: [none, sysadmin, member]
+        permission_options:
+          type: string
+          description: Permission level for managing options on select/multiselect fields
+          enum: [none, sysadmin, member]
         create_at:
           type: integer
           format: int64
@@ -23752,6 +24904,12 @@ components:
         delete_at:
           type: integer
           format: int64
+        created_by:
+          type: string
+          description: User ID of the user who created this property field
+        updated_by:
+          type: string
+          description: User ID of the user who last updated this property field
     PropertyFieldPatch:
       type: object
       properties:
@@ -23761,10 +24919,6 @@ components:
           type: string
         attrs:
           type: object
-        target_id:
-          type: string
-        target_type:
-          type: string
     PropertyValue:
       type: object
       properties:
@@ -23789,6 +24943,12 @@ components:
         delete_at:
           type: integer
           format: int64
+        created_by:
+          type: string
+          description: User ID of the user who created this property value
+        updated_by:
+          type: string
+          description: User ID of the user who last updated this property value
     FileInfoList:
       type: object
       properties:
@@ -24399,8 +25559,8 @@ components:
         Attachments:
           type: array
           items:
-            $ref: "#/components/schemas/SlackAttachment"
-    SlackAttachment:
+            $ref: "#/components/schemas/MessageAttachment"
+    MessageAttachment:
       type: object
       properties:
         Id:
@@ -24426,7 +25586,7 @@ components:
         Fields:
           type: array
           items:
-            $ref: "#/components/schemas/SlackAttachmentField"
+            $ref: "#/components/schemas/MessageAttachmentField"
         ImageURL:
           type: string
         ThumbURL:
@@ -24436,9 +25596,9 @@ components:
         FooterIcon:
           type: string
         Timestamp:
-          description: The timestamp of the slack attachment, either type of string or integer
+          description: The timestamp of the message attachment, either type of string or integer
           type: string
-    SlackAttachmentField:
+    MessageAttachmentField:
       type: object
       properties:
         Title:
@@ -26463,12 +27623,6 @@ components:
           description: The time in milliseconds that this action was performed.
           type: integer
           format: int64
-    PostIdToReactionsMap:
-      type: object
-      additionalProperties:
-        type: array
-        items:
-          $ref: "#/components/schemas/Reaction"
     Product:
       type: object
       properties:
@@ -27382,6 +28536,145 @@ components:
         reason:
           type: string
           description: Reason code if not available (translation ID)
+    AIBridgeTestHelperStatus:
+      type: object
+      properties:
+        available:
+          type: boolean
+          description: Whether the mocked AI bridge should be reported as available
+        reason:
+          type: string
+          description: Optional reason code when the mocked AI bridge is unavailable
+    AIBridgeTestHelperFeatureFlags:
+      type: object
+      properties:
+        enable_ai_plugin_bridge:
+          type: boolean
+          description: Override for the EnableAIPluginBridge feature flag in test mode
+        enable_ai_recaps:
+          type: boolean
+          description: Override for the EnableAIRecaps feature flag in test mode
+    AIBridgeTestHelperCompletion:
+      type: object
+      properties:
+        completion:
+          type: string
+          description: Mocked completion payload returned for a queued bridge operation
+        error:
+          type: string
+          description: Mocked error message returned for a queued bridge operation
+        status_code:
+          type: integer
+          description: Optional HTTP-style status code associated with a mocked error
+    AIBridgeTestHelperMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          description: Role associated with the message payload
+        message:
+          type: string
+          description: Message content sent through the AI bridge
+        file_ids:
+          type: array
+          description: Optional file IDs attached to the bridge message
+          items:
+            type: string
+    AIBridgeTestHelperConfig:
+      type: object
+      properties:
+        status:
+          $ref: "#/components/schemas/AIBridgeTestHelperStatus"
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/BridgeAgentInfo"
+          description: Mock agent list returned from the bridge
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/BridgeServiceInfo"
+          description: Mock service list returned from the bridge
+        agent_completions:
+          type: object
+          description: Queued mocked completion responses keyed by explicit bridge operation name
+          additionalProperties:
+            type: array
+            items:
+              $ref: "#/components/schemas/AIBridgeTestHelperCompletion"
+        feature_flags:
+          $ref: "#/components/schemas/AIBridgeTestHelperFeatureFlags"
+        record_requests:
+          type: boolean
+          description: Whether bridge requests should be recorded for later inspection
+    AIBridgeTestHelperRecordedRequest:
+      type: object
+      properties:
+        operation:
+          type: string
+          description: Explicit bridge operation key such as recap_summary or rewrite
+        client_operation:
+          type: string
+          description: Client-facing operation routed through the bridge client
+        operation_sub_type:
+          type: string
+          description: Optional subtype used to disambiguate bridge requests
+        session_user_id:
+          type: string
+          description: Session user ID used when invoking the bridge
+        user_id:
+          type: string
+          description: Optional effective user ID passed through the bridge request
+        channel_id:
+          type: string
+          description: Optional channel context passed through the bridge request
+        agent_id:
+          type: string
+          description: Agent ID targeted by the bridge completion request
+        service_id:
+          type: string
+          description: Service ID targeted by the bridge completion request
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIBridgeTestHelperMessage"
+          description: Bridge messages sent for the recorded request
+        json_output_format:
+          type: object
+          description: Optional JSON schema requested for structured bridge output
+          additionalProperties: true
+    AIBridgeTestHelperState:
+      type: object
+      properties:
+        status:
+          $ref: "#/components/schemas/AIBridgeTestHelperStatus"
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/BridgeAgentInfo"
+          description: Current mocked agent list
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/BridgeServiceInfo"
+          description: Current mocked service list
+        agent_completions:
+          type: object
+          description: Remaining queued mocked completions keyed by bridge operation
+          additionalProperties:
+            type: array
+            items:
+              $ref: "#/components/schemas/AIBridgeTestHelperCompletion"
+        feature_flags:
+          $ref: "#/components/schemas/AIBridgeTestHelperFeatureFlags"
+        record_requests:
+          type: boolean
+          description: Whether bridge request recording is currently enabled
+        recorded_requests:
+          type: array
+          description: Recorded bridge requests captured while record_requests was enabled
+          items:
+            $ref: "#/components/schemas/AIBridgeTestHelperRecordedRequest"
     PostAcknowledgement:
       type: object
       properties:

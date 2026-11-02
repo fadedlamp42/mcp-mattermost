@@ -1,6 +1,6 @@
 """full api parity in three tools: find an operation, describe it, call it.
 
-exposing all 528 spec operations as tools would cost ~238k tokens of tool
+exposing every spec operation (528 at v11.5.1, 545 at v11.7.14) as tools would cost ~238k tokens of tool
 definitions on every session (measured 2026-10-04, PRI-549 report), and
 opencode loads every mcp tool schema eagerly. so FastMCP.from_openapi still
 builds every operation, but into a private server that is never exposed;
@@ -23,7 +23,7 @@ from fastmcp.server.providers.openapi import MCPType
 from fastmcp.utilities.openapi.models import HTTPRoute
 from pydantic import Field
 
-from .spec import Operation
+from .spec import SPEC_VERSION, Operation
 
 FIND_RESULT_LIMIT = 15
 DESCRIPTION_PREVIEW_CHARACTERS = 1500
@@ -76,7 +76,14 @@ async def register_generic_tools(mcp: FastMCP, spec: dict[str, Any], operations:
     if unreachable:
         raise RuntimeError(f"operations with no internal tool (fastmcp renamed or dropped them): {unreachable[:10]}")
 
-    @mcp.tool(name="mattermost_find_operation")
+    @mcp.tool(
+        name="mattermost_find_operation",
+        description=(
+            f"Search every Mattermost REST v4 operation ({len(operations)}, the server's full API at {SPEC_VERSION}) "
+            "for anything the other mattermost_* tools do not cover. Returns operationIds to pass to "
+            "mattermost_describe_operation and mattermost_call."
+        ),
+    )
     async def find_operation(
         query: Annotated[
             str,
@@ -84,7 +91,6 @@ async def register_generic_tools(mcp: FastMCP, spec: dict[str, Any], operations:
         ],
         limit: Annotated[Optional[int], Field(description=f"Max results (default {FIND_RESULT_LIMIT})")] = None,
     ) -> list[dict[str, Any]]:
-        """Search every Mattermost REST v4 operation (528, the server's full API at v11.5.1) for anything the other mattermost_* tools do not cover. Returns operationIds to pass to mattermost_describe_operation and mattermost_call."""
         ranked = rank_operations(operations, query)[: limit or FIND_RESULT_LIMIT]
         return [
             {

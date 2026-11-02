@@ -13,7 +13,17 @@ from typing import Any, Optional
 
 import httpx
 
-TIMESTAMP_FIELDS = ("create_at", "update_at", "edit_at", "delete_at", "last_post_at", "last_reply_at")
+TIMESTAMP_FIELDS = (
+    "create_at",
+    "update_at",
+    "edit_at",
+    "delete_at",
+    "last_post_at",
+    "last_reply_at",
+    "scheduled_at",
+    "processed_at",
+)
+PRIORITY_LEVELS = {"standard": "", "important": "important", "urgent": "urgent"}
 
 
 class MattermostError(RuntimeError):
@@ -113,6 +123,25 @@ def readable_post_list(post_list: dict[str, Any]) -> dict[str, Any]:
         **post_list,
         "posts": {post_id: readable_timestamps(posts[post_id]) for post_id in order if post_id in posts},
     }
+
+
+def post_priority(priority: Optional[str], requested_ack: bool, persistent_notifications: bool) -> Optional[dict[str, Any]]:
+    """the priority object a post (metadata.priority) or scheduled post
+    (priority) carries, or None when nothing was asked for.
+
+    all three keys are always present: ScheduledPost.ToPost refuses a
+    priority map missing any of them at send time, which would surface as a
+    failed scheduled post hours after the call that created it succeeded.
+    persistent notifications only exist for urgent posts, so that pairing is
+    refused here rather than by the server at an unknowable later moment."""
+    if priority is None and not requested_ack and not persistent_notifications:
+        return None
+    level = PRIORITY_LEVELS.get(priority or "standard")
+    if level is None:
+        raise MattermostError(f"priority must be one of {sorted(PRIORITY_LEVELS)}, got '{priority}'")
+    if persistent_notifications and level != "urgent":
+        raise MattermostError("persistentNotifications requires priority 'urgent'")
+    return {"priority": level, "requested_ack": requested_ack, "persistent_notifications": persistent_notifications}
 
 
 def split_identifiers(value: Optional[str]) -> list[str]:

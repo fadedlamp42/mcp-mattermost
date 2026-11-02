@@ -162,3 +162,18 @@ def test_token_for_the_wrong_sister_is_refused():
     with pytest.raises(IdentityError):
         assert_token_speaks_as_sister(SisterIdentity("lily", "HOST-LILY", "t"), "rose")
     assert_token_speaks_as_sister(SisterIdentity("rose", "HOST-ROSE", "t"), "rose")
+
+
+def test_schedule_result_reminds_to_link_each_named_issue():
+    from mcp_mattermost.scheduling import dossier_reminder
+
+    reminder = dossier_reminder("uahcx8o38pgqpptt11a6cbr8my", "@lily PRI-322 re-measure (PRI-1203 watch, PRI-322)")
+    assert 'value="uahcx8o38pgqpptt11a6cbr8my"' in reminder
+    assert "names PRI-322, PRI-1203;" in reminder
+    assert "several issues" in reminder
+
+
+def test_schedule_result_without_an_issue_points_at_the_current_one():
+    from mcp_mattermost.scheduling import dossier_reminder
+
+    assert "the issue this session is working on" in dossier_reminder("x" * 26, "@lily say hi")

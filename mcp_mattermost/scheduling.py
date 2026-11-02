@@ -19,6 +19,7 @@ raw api leaves to the caller (all hit by hand on 2026-11-02):
     opens a fresh session when it fires (verified 2026-11-02, @lily say hi)
 """
 
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Any, Optional
 
@@ -44,6 +45,38 @@ WAKE_DESCRIPTION = (
     "https://mattermost.prism-dynamics.org/prism-dynamics/pl/6dgkkuydgb853pzka4owi3wbxy). "
     "Write the message as instructions to that future session"
 )
+
+
+ISSUE_MENTION = re.compile(r"\b([A-Z]{2,6}-\d+)\b")
+
+
+def dossier_reminder(post_id: str, message: str) -> str:
+    """the line a schedule result carries so the scheduling session links the
+    post into the supervision dossier without being told to (peter,
+    2026-11-02: "an automatic mechanism, so I never have to remind sisters").
+
+    it rides in the RESULT rather than only the description because the
+    result arrives at the one moment the session holds the id and is
+    choosing its next step. the issue ids the message names are offered as
+    candidates, never applied: a post can name an issue it is not about.
+    """
+    named = list(dict.fromkeys(ISSUE_MENTION.findall(message)))
+    call = (
+        'prism_supervision_record(issue_id=<issue>, kind="mattermost_scheduled_post", '
+        'value="%(id)s", session_id=<your session id>)' % {"id": post_id}
+    )
+    candidates = (
+        " The message names %(ids)s; link the ones it serves." % {"ids": ", ".join(named)}
+        if named
+        else " It names no issue id, so link the issue this session is working on."
+    )
+    return (
+        "Record this post in the supervision dossier now: %(call)s, once per issue it serves "
+        "(one post may be linked to several issues).%(candidates)s Linked, it shows as a wake "
+        "on each issue's cockpit row; unlinked, it waits on the cockpit's unlinked-wakes shelf. "
+        "Skip this only when the post serves no tracked issue."
+        % {"call": call, "candidates": candidates}
+    )
 
 
 def epoch_milliseconds_from_iso(at: str, now: Optional[datetime] = None) -> int:
@@ -108,7 +141,7 @@ def register_scheduling_tools(mcp: FastMCP, mattermost: Mattermost) -> None:
         requestedAck: Annotated[bool, Field(description=REQUESTED_ACK_DESCRIPTION)] = False,
         persistentNotifications: Annotated[bool, Field(description=PERSISTENT_NOTIFICATIONS_DESCRIPTION)] = False,
     ) -> dict[str, Any]:
-        """Schedule a post to be sent later as this account. Use it for reminders, follow-up checks, and (with wake=true) for waking a fresh agent session at a future time. Returns the scheduled post with its id; list, update, or cancel it with the other mattermost_*scheduled_post* tools. When it serves a tracked issue, record that id with prism_supervision_record(issue_id, kind="mattermost_scheduled_post", value=<id>) so the cockpit shows the wake on the issue's row; an unrecorded one lands on the cockpit's unlinked-wakes shelf instead."""
+        """Schedule a post to be sent later as this account. Use it for reminders, follow-up checks, and (with wake=true) for waking a fresh agent session at a future time. Returns the scheduled post with its id; list, update, or cancel it with the other mattermost_*scheduled_post* tools. When it serves a tracked issue, record that id with prism_supervision_record(issue_id, kind="mattermost_scheduled_post", value=<id>) on EACH issue it serves (one post may be linked to several), so the cockpit shows the wake on those rows; the result's `next` field spells out the exact call. An unrecorded one lands on the cockpit's unlinked-wakes shelf instead."""
         body: dict[str, Any] = {
             "channel_id": channelId,
             "message": with_self_mention(message, mattermost.me["username"]) if wake else message,
@@ -120,7 +153,11 @@ def register_scheduling_tools(mcp: FastMCP, mattermost: Mattermost) -> None:
         if priority_fields:
             body["priority"] = priority_fields
         scheduled = await mattermost.request("POST", "/api/v4/posts/schedule", json=body)
-        return {**readable_timestamps(scheduled), "note": SENDER_INTERVAL_NOTE}
+        return {
+            **readable_timestamps(scheduled),
+            "note": SENDER_INTERVAL_NOTE,
+            "next": dossier_reminder(scheduled.get("id") or "", body["message"]),
+        }
 
     @mcp.tool(name="mattermost_list_scheduled_posts")
     async def list_scheduled_posts() -> list[dict[str, Any]]:

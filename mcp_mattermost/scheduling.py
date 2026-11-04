@@ -70,10 +70,17 @@ def dossier_reminder(post_id: str, message: str) -> str:
         if named
         else " It names no issue id, so link the issue this session is working on."
     )
+    # the monitoring nudge (peter, 2026-11-04): most wakes are tail-end
+    # rollout checks on merged work, which is not review and should not hold
+    # a wip slot. the merged precondition is spelled out because a wake on
+    # unmerged work is a different situation and keeps its real status.
     return (
         "Record this post in the supervision dossier now: %(call)s, once per issue it serves "
         "(one post may be linked to several issues).%(candidates)s Linked, it shows as a wake "
         "on each issue's cockpit row; unlinked, it waits on the cockpit's unlinked-wakes shelf. "
+        "If every PR for the issue is merged and this wake only watches the rollout, pass "
+        'status="monitoring" in the same call (with status_source naming you): monitoring holds '
+        "no wip slot. If anything is still unmerged, it is not monitoring; keep its real status. "
         "Skip this only when the post serves no tracked issue."
         % {"call": call, "candidates": candidates}
     )

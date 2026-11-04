@@ -177,3 +177,12 @@ def test_schedule_result_without_an_issue_points_at_the_current_one():
     from mcp_mattermost.scheduling import dossier_reminder
 
     assert "the issue this session is working on" in dossier_reminder("x" * 26, "@lily say hi")
+
+
+def test_schedule_result_offers_monitoring_only_for_merged_work():
+    from mcp_mattermost.scheduling import dossier_reminder
+
+    reminder = dossier_reminder("x" * 26, "@lily verify PRI-1 rollout")
+    assert 'status="monitoring"' in reminder
+    assert "every PR for the issue is merged" in reminder
+    assert "still unmerged, it is not monitoring" in reminder

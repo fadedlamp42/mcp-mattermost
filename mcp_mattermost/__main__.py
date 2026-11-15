@@ -4,6 +4,8 @@ environment:
     MCP_MATTERMOST_URL              server origin (required)
     MCP_MATTERMOST_TEAM_NAME        team the core tools act in (required)
     MCP_MATTERMOST_TOKEN_<SISTER>   one per sister, e.g. MCP_MATTERMOST_TOKEN_ROSE
+    MCP_MATTERMOST_URL_<SISTER>     optional, overrides the URL for one sister
+    MCP_MATTERMOST_TEAM_NAME_<SISTER>  optional, overrides the team for one sister
     MCP_MATTERMOST_VOICES_MANIFEST  override path to sttts voices.yaml (optional)
 
 every startup check fails closed: the process exits nonzero with the reason
@@ -20,7 +22,7 @@ from fastmcp import FastMCP
 from .api import Mattermost
 from .core_tools import register_core_tools
 from .generic_tools import register_generic_tools
-from .identity import IdentityError, assert_token_speaks_as_sister, resolve_identity
+from .identity import IdentityError, assert_token_speaks_as_sister, resolve_identity, setting_for_sister
 from .scheduling import register_scheduling_tools
 from .spec import index_operations, load_spec
 
@@ -36,17 +38,17 @@ INSTRUCTIONS = (
 )
 
 
-def required_environment(name: str) -> str:
-    value = (os.environ.get(name) or "").strip()
+def required_sister_setting(name: str, sister: str) -> str:
+    value = setting_for_sister(name, sister, dict(os.environ))
     if not value:
-        raise IdentityError(f"{name} is required")
+        raise IdentityError(f"{name} (or {name}_{sister.upper()}) is required")
     return value
 
 
 async def build_server() -> FastMCP:
     identity = resolve_identity()
-    base_url = required_environment("MCP_MATTERMOST_URL").rstrip("/")
-    team_name = required_environment("MCP_MATTERMOST_TEAM_NAME")
+    base_url = required_sister_setting("MCP_MATTERMOST_URL", identity.sister).rstrip("/")
+    team_name = required_sister_setting("MCP_MATTERMOST_TEAM_NAME", identity.sister)
 
     client = httpx.AsyncClient(
         base_url=base_url,

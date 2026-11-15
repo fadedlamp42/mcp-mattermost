@@ -83,6 +83,18 @@ def token_for_sister(sister: str, environment: dict[str, str]) -> str:
     return token
 
 
+def setting_for_sister(name: str, sister: str, environment: dict[str, str]) -> str:
+    """<NAME>_<SISTER> when set, else the shared <NAME>; empty when neither is.
+
+    lets one committed profile serve sisters on different servers: violet
+    talks to her own mattermost (localhost, team "vapi") while rose and lily
+    share prism-dynamics, so violet's line overrides the shared one."""
+    sister_value = (environment.get(f"{name}_{sister.upper()}") or "").strip()
+    if sister_value:
+        return sister_value
+    return (environment.get(name) or "").strip()
+
+
 def resolve_identity(environment: Optional[dict[str, str]] = None) -> SisterIdentity:
     """the full chain: host id -> sister -> token. raises IdentityError."""
     environment = dict(os.environ) if environment is None else environment
